@@ -36,6 +36,12 @@
     color: white; padding: 8px 14px; border-radius: 8px; font-size: 14px;
     display: none;
   }
+  #tapOverlay {
+    position: fixed; inset: 0; z-index: 999;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.7); color: white; font-size: 1.2rem;
+    text-align: center; cursor: pointer;
+  }
 </style>
 </head>
 <body>
@@ -47,8 +53,9 @@
   <button id="connectBtn">Conectar</button>
 </div>
 
-<video id="video" autoplay playsinline></video>
+<video id="video" autoplay playsinline muted></video>
 <div id="status"></div>
+<div id="tapOverlay">Toca para reproducir<br>la transmisión</div>
 
 <script>
 // ==== CONFIGURACIÓN (debe coincidir con camara.html) ====
@@ -65,6 +72,12 @@ const videoEl = document.getElementById('video');
 const statusEl = document.getElementById('status');
 const roomInput = document.getElementById('roomInput');
 const connectBtn = document.getElementById('connectBtn');
+const tapOverlay = document.getElementById('tapOverlay');
+
+tapOverlay.addEventListener('click', () => {
+  videoEl.play().catch(() => {});
+  tapOverlay.style.display = 'none';
+});
 
 let roomId = "";
 let pc = null;
@@ -104,6 +117,9 @@ async function connect() {
   pc.ontrack = (event) => {
     videoEl.srcObject = event.streams[0];
     showStatus("Conectado");
+    videoEl.play().catch(() => {
+      tapOverlay.style.display = 'flex';
+    });
   };
 
   pc.onicecandidate = (event) => {
