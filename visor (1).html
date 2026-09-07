@@ -3,15 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ManinaCam - Cámara</title>
+<title>ManinaCam - Visor</title>
 <style>
   html, body {
     margin: 0; padding: 0; background: #000; height: 100%;
     font-family: Arial, sans-serif; overflow: hidden;
   }
   #video {
-    width: 100%; height: 100%; object-fit: cover;
-    background: #111;
+    width: 100%; height: 100%; object-fit: contain;
+    background: #000;
   }
   #setup {
     position: fixed; inset: 0; background: #111;
@@ -25,16 +25,22 @@
     border-radius: 8px; border: 1px solid #444; background: #222;
     color: white; margin-bottom: 16px; box-sizing: border-box;
   }
-  #startBtn {
+  #connectBtn {
     width: 100%; max-width: 320px; padding: 16px; font-size: 16px;
     border-radius: 8px; border: none; background: #1976D2; color: white;
     cursor: pointer;
   }
-  #startBtn:active { background: #1565C0; }
+  #connectBtn:active { background: #1565C0; }
   #status {
     position: fixed; top: 12px; left: 12px; background: rgba(0,0,0,0.6);
     color: white; padding: 8px 14px; border-radius: 8px; font-size: 14px;
     display: none;
+  }
+  #tapOverlay {
+    position: fixed; inset: 0; z-index: 999;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.7); color: white; font-size: 1.2rem;
+    text-align: center; cursor: pointer;
   }
   #debugLog {
     position: fixed; bottom: 0; left: 0; right: 0; max-height: 40%;
@@ -48,34 +54,32 @@
 
 <div id="setup">
   <h1>ManinaCam</h1>
-  <p>Modo Cámara — deja esta tablet apuntando<br>a lo que quieres vigilar</p>
+  <p>Modo Visor — ver la transmisión<br>de la cámara</p>
   <input id="roomInput" type="text" placeholder="Código de sala (ej: casa123)">
-  <button id="startBtn">Iniciar transmisión</button>
+  <button id="connectBtn">Conectar</button>
 </div>
 
 <video id="video" autoplay playsinline muted></video>
 <div id="status"></div>
+<div id="tapOverlay">Toca para reproducir<br>la transmisión</div>
 <div id="debugLog"></div>
 
 <script>
-// ==== CONFIGURACIÓN ====
+// ==== CONFIGURACIÓN (debe coincidir con camara.html) ====
 const FIREBASE_URL = "https://lool-3bde4-default-rtdb.firebaseio.com";
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
   { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" }
 ];
-const VIDEO_CONSTRAINTS = {
-  video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 }, facingMode: "environment" },
-  audio: true
-};
-// ========================
+// ==========================================================
 
 const setupEl = document.getElementById('setup');
 const videoEl = document.getElementById('video');
 const statusEl = document.getElementById('status');
 const roomInput = document.getElementById('roomInput');
-const startBtn = document.getElementById('startBtn');
+const connectBtn = document.getElementById('connectBtn');
+const tapOverlay = document.getElementById('tapOverlay');
 const debugLog = document.getElementById('debugLog');
 
 function log(msg) {
@@ -86,10 +90,24 @@ function log(msg) {
   while (debugLog.children.length > 40) debugLog.removeChild(debugLog.firstChild);
 }
 
+videoEl.addEventListener('loadedmetadata', () => {
+  log(`loadedmetadata: ${videoEl.videoWidth}x${videoEl.videoHeight}`);
+});
+videoEl.addEventListener('playing', () => log('video: playing (ya hay frames)'));
+videoEl.addEventListener('stalled', () => log('video: stalled'));
+videoEl.addEventListener('waiting', () => log('video: waiting (buffering)'));
+videoEl.addEventListener('error', () => log('video: ERROR — ' + (videoEl.error ? videoEl.error.message : '?')));
+
+tapOverlay.addEventListener('click', () => {
+  videoEl.play().catch(() => {});
+  tapOverlay.style.display = 'none';
+});
+
 let roomId = "";
 let pc = null;
 let pollTimer = null;
 let candidateIndex = 0;
+let answered = false;
 
 function showStatus(text) {
   statusEl.style.display = 'block';
@@ -111,43 +129,31 @@ async function fbGet(path) {
   try { return JSON.parse(text); } catch { return null; }
 }
 
-async function fbDelete(path) {
-  await fetch(`${FIREBASE_URL}/rooms/${roomId}${path ? '/' + path : ''}.json`, { method: 'DELETE' });
-}
-
-async function startStreaming() {
+async function connect() {
   roomId = roomInput.value.trim();
-  if (!roomId) { alert("Escribe un código de sala"); return; }
+  if (!roomId) { alert("Escribe el código de sala"); return; }
 
   setupEl.style.display = 'none';
-  showStatus("Pidiendo permiso de cámara...");
-
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS);
-  } catch (e) {
-    showStatus("Error al abrir la cámara: " + e.message);
-    setupEl.style.display = 'flex';
-    return;
-  }
-
-  videoEl.srcObject = stream;
-  const vt = stream.getVideoTracks()[0];
-  const at = stream.getAudioTracks()[0];
-  log(`getUserMedia OK. video: ${vt ? vt.label + ' ' + JSON.stringify(vt.getSettings()) : 'NINGUNO'}`);
-  log(`audio: ${at ? at.label : 'ninguno'}`);
-  showStatus("Limpiando sala...");
-  await fbDelete("");
+  showStatus("Buscando la cámara...");
 
   pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  stream.getTracks().forEach(track => {
-    pc.addTrack(track, stream);
-    log(`addTrack: ${track.kind} readyState=${track.readyState}`);
-  });
+
+  pc.ontrack = (event) => {
+    const t = event.track;
+    log(`ontrack: kind=${t.kind} readyState=${t.readyState} muted=${t.muted} streamTracks=${event.streams[0].getTracks().length}`);
+    videoEl.srcObject = event.streams[0];
+    showStatus("Conectado");
+    videoEl.play().then(() => {
+      log('play(): OK');
+    }).catch((err) => {
+      log('play(): FALLÓ — ' + err.name + ': ' + err.message);
+      tapOverlay.style.display = 'flex';
+    });
+  };
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
-      fbPut(`callerCandidates/${candidateIndex++}`, event.candidate.toJSON());
+      fbPut(`calleeCandidates/${candidateIndex++}`, event.candidate.toJSON());
     }
   };
 
@@ -155,45 +161,35 @@ async function startStreaming() {
     showStatus("Estado: " + pc.iceConnectionState);
   };
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  await fbPut("offer", { type: offer.type, sdp: offer.sdp });
-  showStatus("Esperando visor...");
-
-  let answered = false;
   pollTimer = setInterval(async () => {
     if (!answered) {
-      const answer = await fbGet("answer");
-      if (answer) {
+      const offer = await fbGet("offer");
+      if (offer) {
         answered = true;
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
-        showStatus("Visor conectado");
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await fbPut("answer", { type: answer.type, sdp: answer.sdp });
+        showStatus("Conectando video...");
       }
     }
-    const candidates = await fbGet("calleeCandidates");
+    const candidates = await fbGet("callerCandidates");
     if (candidates) {
       for (const key in candidates) {
         try { await pc.addIceCandidate(new RTCIceCandidate(candidates[key])); } catch (e) {}
       }
     }
   }, 2000);
-
-  // Evita que la pantalla se apague mientras transmite (si el navegador lo soporta)
-  try {
-    if ('wakeLock' in navigator) {
-      await navigator.wakeLock.request('screen');
-    }
-  } catch (e) {}
 }
 
-startBtn.addEventListener('click', startStreaming);
+connectBtn.addEventListener('click', connect);
 
-// Si la URL trae ?room=algo, lo llenamos y arrancamos solo, sin pedir nada.
+// Si la URL trae ?room=algo, conecta directo sin pedir nada.
 const params = new URLSearchParams(window.location.search);
 const roomFromUrl = params.get('room');
 if (roomFromUrl) {
   roomInput.value = roomFromUrl;
-  startStreaming();
+  connect();
 }
 </script>
 
