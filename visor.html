@@ -42,6 +42,12 @@
     background: rgba(0,0,0,0.7); color: white; font-size: 1.2rem;
     text-align: center; cursor: pointer;
   }
+  #debugLog {
+    position: fixed; bottom: 0; left: 0; right: 0; max-height: 40%;
+    overflow-y: auto; background: rgba(0,0,0,0.75); color: #0f0;
+    font-family: monospace; font-size: 11px; padding: 6px 8px;
+    box-sizing: border-box; z-index: 1000; white-space: pre-wrap;
+  }
 </style>
 </head>
 <body>
@@ -56,14 +62,15 @@
 <video id="video" autoplay playsinline muted></video>
 <div id="status"></div>
 <div id="tapOverlay">Toca para reproducir<br>la transmisión</div>
+<div id="debugLog"></div>
 
 <script>
 // ==== CONFIGURACIÓN (debe coincidir con camara.html) ====
 const FIREBASE_URL = "https://lool-3bde4-default-rtdb.firebaseio.com";
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
-  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" }
+  { urls: "turn:free.expressturn.com:3478?transport=udp", username: "000000002104118924", credential: "cKaEwsVIfFmadH32WP9CCNdpPBw=" },
+  { urls: "turn:free.expressturn.com:3478?transport=tcp", username: "000000002104118924", credential: "cKaEwsVIfFmadH32WP9CCNdpPBw=" }
 ];
 // ==========================================================
 
@@ -73,6 +80,23 @@ const statusEl = document.getElementById('status');
 const roomInput = document.getElementById('roomInput');
 const connectBtn = document.getElementById('connectBtn');
 const tapOverlay = document.getElementById('tapOverlay');
+const debugLog = document.getElementById('debugLog');
+
+function log(msg) {
+  const line = document.createElement('div');
+  line.textContent = new Date().toLocaleTimeString() + ' — ' + msg;
+  debugLog.appendChild(line);
+  debugLog.scrollTop = debugLog.scrollHeight;
+  while (debugLog.children.length > 40) debugLog.removeChild(debugLog.firstChild);
+}
+
+videoEl.addEventListener('loadedmetadata', () => {
+  log(`loadedmetadata: ${videoEl.videoWidth}x${videoEl.videoHeight}`);
+});
+videoEl.addEventListener('playing', () => log('video: playing (ya hay frames)'));
+videoEl.addEventListener('stalled', () => log('video: stalled'));
+videoEl.addEventListener('waiting', () => log('video: waiting (buffering)'));
+videoEl.addEventListener('error', () => log('video: ERROR — ' + (videoEl.error ? videoEl.error.message : '?')));
 
 tapOverlay.addEventListener('click', () => {
   videoEl.play().catch(() => {});
@@ -84,6 +108,20 @@ let pc = null;
 let pollTimer = null;
 let candidateIndex = 0;
 let answered = false;
+let reconnectScheduled = false;
+
+function scheduleReconnect() {
+  if (reconnectScheduled) return;
+  reconnectScheduled = true;
+  const params = new URLSearchParams(window.location.search);
+  if (!params.get('room')) {
+    log('Conexión perdida. Recarga la página o toca Conectar de nuevo.');
+    return;
+  }
+  log('Conexión perdida, reintentando en 5s...');
+  showStatus("Reconectando...");
+  setTimeout(() => location.reload(), 5000);
+}
 
 function showStatus(text) {
   statusEl.style.display = 'block';
@@ -115,9 +153,14 @@ async function connect() {
   pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
   pc.ontrack = (event) => {
+    const t = event.track;
+    log(`ontrack: kind=${t.kind} readyState=${t.readyState} muted=${t.muted} streamTracks=${event.streams[0].getTracks().length}`);
     videoEl.srcObject = event.streams[0];
     showStatus("Conectado");
-    videoEl.play().catch(() => {
+    videoEl.play().then(() => {
+      log('play(): OK');
+    }).catch((err) => {
+      log('play(): FALLÓ — ' + err.name + ': ' + err.message);
       tapOverlay.style.display = 'flex';
     });
   };
@@ -130,6 +173,10 @@ async function connect() {
 
   pc.oniceconnectionstatechange = () => {
     showStatus("Estado: " + pc.iceConnectionState);
+    log('ICE state: ' + pc.iceConnectionState);
+    if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+      scheduleReconnect();
+    }
   };
 
   pollTimer = setInterval(async () => {
